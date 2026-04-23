@@ -1,0 +1,45 @@
+name: Daily Bio News
+
+on:
+  # JST 10:00 = UTC 01:00
+  schedule:
+    - cron: '0 1 * * *'
+  # テスト用：GitHub の Actions タブから手動実行できる
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # HTML を commit/push するために必要
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js をセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 依存パッケージをインストール
+        run: npm ci
+
+      - name: ニュース取得・HTML生成・LINE送信
+        run: node fetch-rss.js
+        env:
+          BASE_URL: https://ayano330.github.io/bio-news
+          # OUTPUT_ROOT を . にすると bio-news/日付/ がリポジトリ直下に書き出される
+          OUTPUT_ROOT: .
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+
+      - name: 生成した HTML をコミット＆プッシュ
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bio-news/
+          # 差分があるときだけコミットする（変化なしでも失敗しない）
+          git diff --cached --quiet || git commit -m "chore: daily bio news $(TZ=Asia/Tokyo date +%Y-%m-%d)"
+          git push
