@@ -191,7 +191,9 @@ async function main() {
   await sendLineMessage(lineText);
 }
 
-main().catch((err) => {
-  console.error("エラー:", err.message);
-  process.exitCode = 1;
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error("エラー:", err.message);
+    process.exit(1);
+  });
