@@ -351,6 +351,8 @@ async function main() {
     const description = item.contentSnippet || item.content || item.description || "";
 
     // Gemini で要約生成（APIキーがなければスキップ）
+    // 2件目以降はレート制限を避けるため3秒待つ
+    if (i > 0) await new Promise((r) => setTimeout(r, 3000));
     const { titleJa, summary, highlight } = await generateSummary(
       item.title || "",
       description
