@@ -77,7 +77,7 @@ function callGemini(prompt) {
               resolve("");
             }
           } else {
-            console.warn("[Gemini] HTTPエラー:", res.statusCode);
+            console.warn("[Gemini] HTTPエラー:", res.statusCode, data.slice(0, 400));
             resolve("");
           }
         });
