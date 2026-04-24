@@ -39,27 +39,150 @@ function todayJstYmd() {
 }
 
 // ----------------------------------------------------------------
+// Gemini API（REST・追加パッケージ不要）
+// ----------------------------------------------------------------
+
+/** Gemini にプロンプトを送り、生テキストを返す。失敗時は "" を返す（例外を投げない） */
+function callGemini(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return Promise.resolve("");
+
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.3, maxOutputTokens: 512 },
+  });
+
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        hostname: "generativelanguage.googleapis.com",
+        path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          if (res.statusCode === 200) {
+            try {
+              const json = JSON.parse(data);
+              resolve(
+                (json.candidates?.[0]?.content?.parts?.[0]?.text || "").trim()
+              );
+            } catch {
+              resolve("");
+            }
+          } else {
+            console.warn("[Gemini] HTTPエラー:", res.statusCode);
+            resolve("");
+          }
+        });
+      }
+    );
+    req.on("error", (err) => {
+      console.warn("[Gemini] 接続エラー:", err.message);
+      resolve("");
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * RSS のタイトルと概要文から日本語の要約データを生成する。
+ * GEMINI_API_KEY が未設定の場合は空文字オブジェクトを返す。
+ * @returns {{ titleJa: string, summary: string, highlight: string }}
+ */
+async function generateSummary(title, description) {
+  if (!process.env.GEMINI_API_KEY) {
+    console.log("[Gemini] GEMINI_API_KEY が未設定のためスキップします");
+    return { titleJa: "", summary: "", highlight: "" };
+  }
+
+  const descPart = description
+    ? `\n概要（英語）：${description.slice(0, 600)}`
+    : "";
+
+  const prompt = `以下の生物学論文について、日本語で答えてください。
+タイトル（英語）：${title}${descPart}
+
+次の3項目だけをJSON形式で返してください（コードブロック・余分な文字は不要）：
+{
+  "titleJa": "日本語タイトル（自然な日本語・30文字以内）",
+  "summary": "研究の要約（2〜3文・高校生にも分かりやすく）",
+  "highlight": "この研究のすごいところ・新しさ（1〜2文）"
+}`;
+
+  console.log("[Gemini] 要約生成中:", title.slice(0, 60) + "…");
+  const raw = await callGemini(prompt);
+
+  try {
+    const jsonStr = raw
+      .replace(/```json\s*/g, "")
+      .replace(/```\s*/g, "")
+      .trim();
+    const parsed = JSON.parse(jsonStr);
+    console.log("[Gemini] 生成成功 ✓");
+    return {
+      titleJa: parsed.titleJa || "",
+      summary: parsed.summary || "",
+      highlight: parsed.highlight || "",
+    };
+  } catch {
+    console.warn("[Gemini] JSONパース失敗。生テキスト:", raw.slice(0, 200));
+    return { titleJa: "", summary: raw.slice(0, 300), highlight: "" };
+  }
+}
+
+// ----------------------------------------------------------------
 // HTML テンプレート
 // ----------------------------------------------------------------
 
 /** トピック番号ごとのグラデーション色クラス */
 const TOPIC_COLORS = [
-  "from-emerald-600 to-teal-500",   // topic-1
-  "from-sky-600 to-cyan-500",        // topic-2
-  "from-violet-600 to-fuchsia-500",  // topic-3
+  "from-emerald-600 to-teal-500",  // topic-1
+  "from-sky-600 to-cyan-500",       // topic-2
+  "from-violet-600 to-fuchsia-500", // topic-3
 ];
 
-function topicPageHtml({ title, sourceUrl, topicIndex, dateStr }) {
+function topicPageHtml({
+  title,
+  sourceUrl,
+  topicIndex,
+  dateStr,
+  titleJa,
+  summary,
+  highlight,
+}) {
   const safeTitle = escapeHtml(title);
+  const safeTitleJa = escapeHtml(titleJa || "");
   const safeSource = escapeHtml(sourceUrl || "");
+  const safeSummary = escapeHtml(summary || "");
+  const safeHighlight = escapeHtml(highlight || "");
   const gradient = TOPIC_COLORS[(topicIndex - 1) % TOPIC_COLORS.length];
+
+  const summaryHtml = safeSummary
+    ? `<p class="mt-2 text-sm text-slate-600">${safeSummary}</p>`
+    : `<p class="mt-2 text-sm text-slate-400">（要約は生成されませんでした）</p>`;
+
+  const highlightHtml = safeHighlight
+    ? `<p class="mt-2 text-sm text-amber-950">${safeHighlight}</p>`
+    : `<p class="mt-2 text-sm text-amber-400">（自動生成されませんでした）</p>`;
+
+  const titleJaHtml = safeTitleJa
+    ? `<p class="mt-1 text-base font-semibold opacity-90">${safeTitleJa}</p>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${safeTitle}</title>
+  <title>${safeTitleJa || safeTitle}</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="min-h-screen bg-slate-100 text-slate-800">
@@ -72,7 +195,8 @@ function topicPageHtml({ title, sourceUrl, topicIndex, dateStr }) {
           DETAIL PAGE / TOPIC ${topicIndex} / ${dateStr}
         </p>
         <h1 class="mt-1 text-2xl font-bold">${safeTitle}</h1>
-        <p class="mt-2 text-sm opacity-90">
+        ${titleJaHtml}
+        <p class="mt-3 text-sm opacity-90">
           <a href="${safeSource}" target="_blank" rel="noopener"
              class="underline underline-offset-2">元記事（Nature 等）→</a>
         </p>
@@ -97,11 +221,11 @@ function topicPageHtml({ title, sourceUrl, topicIndex, dateStr }) {
         <div class="space-y-4">
           <div class="rounded-2xl bg-slate-50 p-5 min-h-[90px] border border-slate-200">
             <h3 class="font-bold text-slate-800">要約</h3>
-            <p class="mt-2 text-sm text-slate-600">（ここに要約を記入します）</p>
+            ${summaryHtml}
           </div>
           <div class="rounded-2xl bg-amber-50 p-5 border border-amber-200 min-h-[90px]">
             <h3 class="font-bold text-amber-900">ここがすごい</h3>
-            <p class="mt-2 text-sm text-amber-950">（新規性・価値を1〜2行で記入します）</p>
+            ${highlightHtml}
           </div>
           <div class="rounded-2xl bg-sky-50 p-5 border border-sky-200 min-h-[90px]">
             <h3 class="font-bold text-sky-900">授業への接続</h3>
@@ -126,7 +250,9 @@ function buildLineMessage(top3, dateStr) {
   top3.forEach((item, i) => {
     const n = i + 1;
     const detailUrl = `${BASE_URL}/bio-news/${dateStr}/topic-${n}.html`;
-    lines.push(`${n}. ${item.title || "(無題)"}`);
+    // 日本語タイトルがあればそちらを優先
+    const displayTitle = item._titleJa || item.title || "(無題)";
+    lines.push(`${n}. ${displayTitle}`);
     lines.push(`詳細：${detailUrl}`);
     lines.push("");
   });
@@ -213,12 +339,27 @@ async function main() {
   console.log("date (JST):", dateStr);
   console.log("");
 
-  // 3. HTML 3枚を書き出し
+  // 3. Gemini で各記事の要約を生成 → HTML を書き出し
   const outDir = path.join(OUTPUT_ROOT, "bio-news", dateStr);
   fs.mkdirSync(outDir, { recursive: true });
 
-  top3.forEach((item, i) => {
+  for (let i = 0; i < top3.length; i++) {
+    const item = top3[i];
     const n = i + 1;
+
+    // RSS の概要文（description / contentSnippet）を取得
+    const description = item.contentSnippet || item.content || item.description || "";
+
+    // Gemini で要約生成（APIキーがなければスキップ）
+    const { titleJa, summary, highlight } = await generateSummary(
+      item.title || "",
+      description
+    );
+
+    // LINE 用に日本語タイトルを item に付与
+    item._titleJa = titleJa;
+
+    // HTML 書き出し
     const filePath = path.join(outDir, `topic-${n}.html`);
     fs.writeFileSync(
       filePath,
@@ -227,11 +368,14 @@ async function main() {
         sourceUrl: item.link || "",
         topicIndex: n,
         dateStr,
+        titleJa,
+        summary,
+        highlight,
       }),
       "utf8"
     );
     console.log("書き出し:", filePath);
-  });
+  }
   console.log("");
 
   // 4. LINE 用テキスト表示 & 送信
