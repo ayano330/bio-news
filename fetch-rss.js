@@ -20,6 +20,11 @@ const OUTPUT_ROOT = process.env.OUTPUT_ROOT
   ? path.resolve(process.env.OUTPUT_ROOT)
   : path.join(__dirname, "output");
 
+/** Gemini のモデル ID（ListModels またはドキュメントで確認）。古い gemini-1.5-flash は v1beta で未提供になることがある */
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+
+const LINE_MESSAGE_REL = path.join("bio-news", ".last_line_message.txt");
+
 // ----------------------------------------------------------------
 // ユーティリティ
 // ----------------------------------------------------------------
@@ -31,6 +36,15 @@ function escapeHtml(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/** RSS の HTML タグを除いた平文（要約失敗時の補助表示用） */
+function stripTags(htmlish) {
+  if (!htmlish) return "";
+  return String(htmlish)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** JST の今日を YYYY-MM-DD */
@@ -49,14 +63,16 @@ function callGemini(prompt) {
 
   const body = JSON.stringify({
     contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 512 },
+    generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
   });
+
+  const modelPath = `/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
   return new Promise((resolve) => {
     const req = https.request(
       {
         hostname: "generativelanguage.googleapis.com",
-        path: `/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+        path: `${modelPath}?key=${encodeURIComponent(apiKey)}`,
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -93,6 +109,22 @@ function callGemini(prompt) {
 }
 
 /**
+ * JSON 形式が失敗したときのプレーンテキスト要約（日本語のみ・本文のみ返す想定）
+ */
+async function generatePlainJapaneseSummary(title, description) {
+  const descPart = description
+    ? `\n概要（英語）：${description.slice(0, 900)}`
+    : "";
+  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、日本語で高校生にも分かるように2〜4文で要約してください。前置き・見出し・箇条書き記号は不要で、要約の本文だけを出力してください。
+
+タイトル（英語）：${title}${descPart}`;
+
+  console.log("[Gemini] プレーン要約にフォールバック…");
+  const text = (await callGemini(prompt)).trim();
+  return text;
+}
+
+/**
  * RSS のタイトルと概要文から日本語の要約データを生成する。
  * GEMINI_API_KEY が未設定の場合は空文字オブジェクトを返す。
  * @returns {{ titleJa: string, summary: string, highlight: string }}
@@ -120,22 +152,32 @@ async function generateSummary(title, description) {
   console.log("[Gemini] 要約生成中:", title.slice(0, 60) + "…");
   const raw = await callGemini(prompt);
 
+  let titleJa = "";
+  let summary = "";
+  let highlight = "";
+
   try {
     const jsonStr = raw
       .replace(/```json\s*/g, "")
       .replace(/```\s*/g, "")
       .trim();
     const parsed = JSON.parse(jsonStr);
-    console.log("[Gemini] 生成成功 ✓");
-    return {
-      titleJa: parsed.titleJa || "",
-      summary: parsed.summary || "",
-      highlight: parsed.highlight || "",
-    };
+    titleJa = (parsed.titleJa || "").trim();
+    summary = (parsed.summary || "").trim();
+    highlight = (parsed.highlight || "").trim();
+    if (summary) {
+      console.log("[Gemini] 生成成功 ✓");
+    }
   } catch {
     console.warn("[Gemini] JSONパース失敗。生テキスト:", raw.slice(0, 200));
-    return { titleJa: "", summary: raw.slice(0, 300), highlight: "" };
   }
+
+  if (!summary) {
+    summary = await generatePlainJapaneseSummary(title, description);
+    if (summary) console.log("[Gemini] プレーン要約で成功 ✓");
+  }
+
+  return { titleJa, summary, highlight };
 }
 
 // ----------------------------------------------------------------
@@ -157,24 +199,37 @@ function topicPageHtml({
   titleJa,
   summary,
   highlight,
+  rssExcerpt,
 }) {
   const safeTitle = escapeHtml(title);
   const safeTitleJa = escapeHtml(titleJa || "");
   const safeSource = escapeHtml(sourceUrl || "");
   const safeSummary = escapeHtml(summary || "");
   const safeHighlight = escapeHtml(highlight || "");
+  const safeExcerpt = escapeHtml(rssExcerpt || "");
   const gradient = TOPIC_COLORS[(topicIndex - 1) % TOPIC_COLORS.length];
 
-  const summaryHtml = safeSummary
-    ? `<p class="mt-2 text-sm text-slate-600">${safeSummary}</p>`
-    : `<p class="mt-2 text-sm text-slate-400">（要約は生成されませんでした）</p>`;
+  let summaryBlock;
+  if (safeSummary) {
+    summaryBlock = `<div class="mt-4 text-lg leading-relaxed text-slate-800 whitespace-pre-wrap">${safeSummary}</div>`;
+  } else if (safeExcerpt) {
+    summaryBlock = `<p class="mt-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+  自動要約を取得できませんでした。RSS の英語抜粋をそのまま表示します。
+</p>
+<div class="mt-4 text-base leading-relaxed text-slate-700 whitespace-pre-wrap">${safeExcerpt}</div>`;
+  } else {
+    summaryBlock = `<p class="mt-4 text-slate-500">要約を表示できませんでした（API またはネットワークを確認してください）。</p>`;
+  }
 
-  const highlightHtml = safeHighlight
-    ? `<p class="mt-2 text-sm text-amber-950">${safeHighlight}</p>`
-    : `<p class="mt-2 text-sm text-amber-400">（自動生成されませんでした）</p>`;
+  const highlightSection = safeHighlight
+    ? `<section class="mt-8 rounded-2xl border border-amber-200 bg-amber-50 p-5">
+  <h2 class="text-sm font-bold uppercase tracking-wide text-amber-900">ポイント</h2>
+  <p class="mt-2 text-base text-amber-950 whitespace-pre-wrap">${safeHighlight}</p>
+</section>`
+    : "";
 
   const titleJaHtml = safeTitleJa
-    ? `<p class="mt-1 text-base font-semibold opacity-90">${safeTitleJa}</p>`
+    ? `<p class="mt-2 text-xl font-semibold">${safeTitleJa}</p>`
     : "";
 
   return `<!DOCTYPE html>
@@ -186,52 +241,25 @@ function topicPageHtml({
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="min-h-screen bg-slate-100 text-slate-800">
-  <div class="max-w-4xl mx-auto px-4 py-10">
+  <div class="max-w-3xl mx-auto px-4 py-10">
 
-    <!-- ヘッダー -->
     <article class="rounded-3xl border border-slate-200 bg-white shadow-xl overflow-hidden">
-      <div class="bg-gradient-to-r ${gradient} px-6 py-5 text-white">
+      <div class="bg-gradient-to-r ${gradient} px-6 py-6 text-white">
         <p class="text-xs font-semibold tracking-wide opacity-90">
-          DETAIL PAGE / TOPIC ${topicIndex} / ${dateStr}
+          ${dateStr} · topic ${topicIndex}
         </p>
-        <h1 class="mt-1 text-2xl font-bold">${safeTitle}</h1>
+        <h1 class="mt-2 text-xl font-bold leading-snug md:text-2xl">${safeTitle}</h1>
         ${titleJaHtml}
-        <p class="mt-3 text-sm opacity-90">
+        <p class="mt-4 text-sm opacity-95">
           <a href="${safeSource}" target="_blank" rel="noopener"
-             class="underline underline-offset-2">元記事（Nature 等）→</a>
+             class="underline underline-offset-2 font-medium">元記事を開く（Nature 等）</a>
         </p>
       </div>
 
-      <!-- 本文エリア -->
-      <div class="p-6 grid gap-6 lg:grid-cols-[1.1fr_0.9fr] items-start">
-
-        <!-- 左：図解エリア -->
-        <div class="rounded-3xl border-2 border-dashed border-slate-300 bg-slate-50 p-6 min-h-[320px]">
-          <h2 class="text-lg font-bold text-slate-700">図解エリア</h2>
-          <p class="mt-2 text-sm text-slate-500">ここに論文の全体像を示す図解を追加します。</p>
-          <div class="mt-6 space-y-3">
-            <div class="rounded-2xl bg-white p-4 text-sm text-slate-700 shadow-sm">① 出発点・背景</div>
-            <div class="rounded-2xl bg-white p-4 text-sm text-slate-700 shadow-sm">② 何を調べたか</div>
-            <div class="rounded-2xl bg-white p-4 text-sm text-slate-700 shadow-sm">③ 何がわかったか</div>
-            <div class="rounded-2xl bg-white p-4 text-sm text-slate-700 shadow-sm">④ 何が新しいか</div>
-          </div>
-        </div>
-
-        <!-- 右：テキストエリア -->
-        <div class="space-y-4">
-          <div class="rounded-2xl bg-slate-50 p-5 min-h-[90px] border border-slate-200">
-            <h3 class="font-bold text-slate-800">要約</h3>
-            ${summaryHtml}
-          </div>
-          <div class="rounded-2xl bg-amber-50 p-5 border border-amber-200 min-h-[90px]">
-            <h3 class="font-bold text-amber-900">ここがすごい</h3>
-            ${highlightHtml}
-          </div>
-          <div class="rounded-2xl bg-sky-50 p-5 border border-sky-200 min-h-[90px]">
-            <h3 class="font-bold text-sky-900">授業への接続</h3>
-            <p class="mt-2 text-sm text-sky-950">（授業でどう使えるかを記入します）</p>
-          </div>
-        </div>
+      <div class="p-6 md:p-8">
+        <h2 class="text-sm font-bold uppercase tracking-wide text-slate-500">日本語要約</h2>
+        ${summaryBlock}
+        ${highlightSection}
       </div>
     </article>
 
@@ -336,6 +364,7 @@ async function main() {
   const dateStr = todayJstYmd();
   console.log("BASE_URL:", BASE_URL);
   console.log("OUTPUT_ROOT:", OUTPUT_ROOT);
+  console.log("GEMINI_MODEL:", GEMINI_MODEL);
   console.log("date (JST):", dateStr);
   console.log("");
 
@@ -349,6 +378,7 @@ async function main() {
 
     // RSS の概要文（description / contentSnippet）を取得
     const description = item.contentSnippet || item.content || item.description || "";
+    const rssExcerpt = stripTags(description).slice(0, 2000);
 
     // Gemini で要約生成（APIキーがなければスキップ）
     // 2件目以降はレート制限を避けるため3秒待つ
@@ -373,6 +403,7 @@ async function main() {
         titleJa,
         summary,
         highlight,
+        rssExcerpt,
       }),
       "utf8"
     );
@@ -380,18 +411,51 @@ async function main() {
   }
   console.log("");
 
-  // 4. LINE 用テキスト表示 & 送信
+  // 4. LINE 用テキスト（後続ステップで送信する場合はファイルに保存）
   const lineText = buildLineMessage(top3, dateStr);
   console.log("--- LINE 用テキスト ---");
   console.log(lineText);
   console.log("");
 
-  await sendLineMessage(lineText);
+  const lineMsgPath = path.join(OUTPUT_ROOT, LINE_MESSAGE_REL);
+  fs.mkdirSync(path.dirname(lineMsgPath), { recursive: true });
+  fs.writeFileSync(lineMsgPath, lineText, "utf8");
+
+  const skipLine =
+    process.env.SKIP_LINE === "1" || process.env.SKIP_LINE === "true";
+  if (skipLine) {
+    console.log(
+      "[LINE] SKIP_LINE のため送信しません。プッシュ後に `node fetch-rss.js --send-line` で送信できます。"
+    );
+  } else {
+    await sendLineMessage(lineText);
+  }
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error("エラー:", err.message);
-    process.exit(1);
-  });
+function runSendLineOnly() {
+  const lineMsgPath = path.join(OUTPUT_ROOT, LINE_MESSAGE_REL);
+  if (!fs.existsSync(lineMsgPath)) {
+    return Promise.reject(
+      new Error(`LINE 用テキストが見つかりません: ${lineMsgPath}`)
+    );
+  }
+  const text = fs.readFileSync(lineMsgPath, "utf8");
+  return sendLineMessage(text);
+}
+
+const argv = process.argv.slice(2);
+if (argv.includes("--send-line")) {
+  runSendLineOnly()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("エラー:", err.message);
+      process.exit(1);
+    });
+} else {
+  main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("エラー:", err.message);
+      process.exit(1);
+    });
+}

@@ -26,15 +26,14 @@ jobs:
       - name: 依存パッケージをインストール
         run: npm ci
 
-      - name: ニュース取得・HTML生成・LINE送信
+      - name: ニュース取得・HTML生成（要約・ページ保存）
         run: node fetch-rss.js
         env:
           BASE_URL: https://ayano330.github.io/bio-news
-          # OUTPUT_ROOT を . にすると bio-news/日付/ がリポジトリ直下に書き出される
           OUTPUT_ROOT: .
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          SKIP_LINE: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
 
       - name: 生成した HTML をコミット＆プッシュ
         run: |
@@ -44,3 +43,10 @@ jobs:
           # 差分があるときだけコミットする（変化なしでも失敗しない）
           git diff --cached --quiet || git commit -m "chore: daily bio news $(TZ=Asia/Tokyo date +%Y-%m-%d)"
           git push
+
+      - name: LINE 送信（プッシュ後・リンクが生きてから）
+        run: node fetch-rss.js --send-line
+        env:
+          OUTPUT_ROOT: .
+          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
