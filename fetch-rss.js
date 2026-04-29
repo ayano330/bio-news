@@ -310,7 +310,7 @@ function topicPageHtml({
   const safeTitleJa = escapeHtml(titleJa || "");
   const safeSource = escapeHtml(sourceUrl || "");
   const safeSummary = escapeHtml(summary || "");
-  const safeHighlight = escapeHtml(highlight || "");
+  const safeHighlightRaw = String(highlight || "").trim();
   const safeExcerpt = escapeHtml(rssExcerpt || "");
   const gradient = TOPIC_COLORS[(topicIndex - 1) % TOPIC_COLORS.length];
 
@@ -326,12 +326,32 @@ function topicPageHtml({
     summaryBlock = `<p class="mt-4 text-slate-500">要約を表示できませんでした（API またはネットワークを確認してください）。</p>`;
   }
 
-  const highlightSection = safeHighlight
-    ? `<section class="mt-8 rounded-2xl border border-amber-200 bg-amber-50 p-5">
+  let highlightSection = "";
+  if (safeHighlightRaw) {
+    const items = safeHighlightRaw
+      .split(/\r?\n/)
+      .map((s) => s.replace(/^[\-\u2022・\d\.\)\s]+/, "").trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    const listHtml = items.length
+      ? `<ul class="mt-3 space-y-2">
+${items
+  .map(
+    (it) =>
+      `  <li class="flex gap-2 text-base text-amber-950"><span class="mt-1 h-2 w-2 shrink-0 rounded-full bg-amber-500"></span><span>${escapeHtml(
+        it
+      )}</span></li>`
+  )
+  .join("\n")}
+</ul>`
+      : `<p class="mt-2 text-base text-amber-950 whitespace-pre-wrap">${escapeHtml(
+          safeHighlightRaw
+        )}</p>`;
+    highlightSection = `<section class="mt-8 rounded-2xl border border-amber-200 bg-amber-50 p-5">
   <h2 class="text-sm font-bold uppercase tracking-wide text-amber-900">ポイント</h2>
-  <p class="mt-2 text-base text-amber-950 whitespace-pre-wrap">${safeHighlight}</p>
-</section>`
-    : "";
+  ${listHtml}
+</section>`;
+  }
 
   const titleJaHtml = safeTitleJa
     ? `<p class="mt-2 text-xl font-semibold">${safeTitleJa}</p>`
@@ -382,13 +402,9 @@ function buildLineMessage(top3, dateStr) {
   const item = top3[0];
   const detailUrl = `${BASE_URL}/bio-news/${dateStr}/topic-1.html`;
   const displayTitle = item?._titleJa || item?.title || "(無題)";
-  const summary = (item?._summary || "").trim();
 
   const lines = ["🧬 今日のバイオニュース（1本）", "", `■ ${displayTitle}`];
-  if (summary) {
-    lines.push("", summary);
-  }
-  lines.push("", `詳細：${detailUrl}`, `元記事：${item?.link || ""}`);
+  lines.push("", `要約はこちら：${detailUrl}`, `元記事：${item?.link || ""}`);
   return lines.join("\n").trimEnd();
 }
 
