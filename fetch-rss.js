@@ -220,7 +220,16 @@ async function generatePlainJapaneseSummary(title, description) {
   const descPart = description
     ? `\n概要（英語）：${description.slice(0, 900)}`
     : "";
-  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、日本語で高校生にも分かるように5〜8文で要約してください。前置き・見出し・箇条書き記号は不要で、要約の本文だけを出力してください。
+  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、生物に興味がある高校生が「わくわく」しながら読める日本語でまとめてください。ただし事実と推測は区別し、誇張しないでください。
+
+次の見出しを必ずこの順番で出して、それぞれ1〜4文で書いてください：
+① 一言でいうと
+② 何を調べたか
+③ 何がわかったか
+④ 何が新しいか
+⑤ 物語として面白く（読み物として6〜10文）
+
+全体の目安は400〜700字です（内容を正確に伝えるために必要なら超えてOK）。余計な前置きは不要です。
 
 タイトル（英語）：${title}${descPart}`;
 
@@ -232,7 +241,7 @@ async function generatePlainJapaneseSummary(title, description) {
 /**
  * RSS のタイトルと概要文から日本語の要約データを生成する。
  * GEMINI_API_KEY が未設定の場合は空文字オブジェクトを返す。
- * @returns {{ titleJa: string, summary: string, highlight: string }}
+ * @returns {{ titleJa: string, summary: string, highlight: string, sections?: any }}
  */
 async function generateSummary(title, description) {
   if (!process.env.GEMINI_API_KEY) {
@@ -244,14 +253,18 @@ async function generateSummary(title, description) {
     ? `\n概要（英語）：${description.slice(0, 600)}`
     : "";
 
-  const prompt = `以下の生物学論文について、日本語で答えてください。
+  const prompt = `以下の生物学関連の記事について、日本語で答えてください。対象は生物に興味がある高校生です。事実と推測を区別し、誇張しないでください。
 タイトル（英語）：${title}${descPart}
 
-次の3項目だけをJSON形式で返してください（コードブロック・余分な文字は不要）：
+次の形式のJSONだけを返してください（コードブロック・余分な文字は不要）：
 {
   "titleJa": "日本語タイトル（自然な日本語・30文字以内）",
-  "summary": "研究の要約（5〜8文・高校生にも分かりやすく）",
-  "highlight": "ポイント（3項目。各項目は短い1文で、改行で区切る）"
+  "oneLiner": "①一言でいうと（1文）",
+  "what": "②何を調べたか（1〜3文）",
+  "found": "③何がわかったか（1〜3文）",
+  "newness": "④何が新しいか（1〜2文）",
+  "story": "⑤物語として面白く（読み物として6〜10文。全体の目安400〜700字だが必要なら超えてOK）",
+  "points": ["ポイント1（短い1文）", "ポイント2（短い1文）", "ポイント3（短い1文）"]
 }`;
 
   console.log("[Gemini] 要約生成中:", title.slice(0, 60) + "…");
@@ -260,6 +273,7 @@ async function generateSummary(title, description) {
   let titleJa = "";
   let summary = "";
   let highlight = "";
+  let sections = null;
 
   try {
     const jsonStr = raw
@@ -268,21 +282,36 @@ async function generateSummary(title, description) {
       .trim();
     const parsed = JSON.parse(jsonStr);
     titleJa = (parsed.titleJa || "").trim();
-    summary = (parsed.summary || "").trim();
-    highlight = (parsed.highlight || "").trim();
-    if (summary) {
+    const oneLiner = (parsed.oneLiner || "").trim();
+    const what = (parsed.what || "").trim();
+    const found = (parsed.found || "").trim();
+    const newness = (parsed.newness || "").trim();
+    const story = (parsed.story || "").trim();
+    const pointsArr = Array.isArray(parsed.points) ? parsed.points : [];
+
+    sections = { oneLiner, what, found, newness, story, points: pointsArr };
+
+    // ページに出す「本文」は story を中心に、他セクションも読めるようにまとめる
+    summary = story;
+    const pointsText = pointsArr
+      .map((p) => String(p || "").trim())
+      .filter(Boolean)
+      .join("\n");
+    highlight = pointsText;
+
+    if (summary || oneLiner || what || found || newness) {
       console.log("[Gemini] 生成成功 ✓");
     }
   } catch {
     console.warn("[Gemini] JSONパース失敗。生テキスト:", raw.slice(0, 200));
   }
 
-  if (!summary) {
+  if (!summary && !sections) {
     summary = await generatePlainJapaneseSummary(title, description);
     if (summary) console.log("[Gemini] プレーン要約で成功 ✓");
   }
 
-  return { titleJa, summary, highlight };
+  return { titleJa, summary, highlight, sections };
 }
 
 // ----------------------------------------------------------------
@@ -305,6 +334,7 @@ function topicPageHtml({
   summary,
   highlight,
   rssExcerpt,
+  sections,
 }) {
   const safeTitle = escapeHtml(title);
   const safeTitleJa = escapeHtml(titleJa || "");
@@ -315,7 +345,48 @@ function topicPageHtml({
   const gradient = TOPIC_COLORS[(topicIndex - 1) % TOPIC_COLORS.length];
 
   let summaryBlock;
-  if (safeSummary) {
+  const hasSections =
+    sections &&
+    typeof sections === "object" &&
+    (sections.oneLiner ||
+      sections.what ||
+      sections.found ||
+      sections.newness ||
+      sections.story);
+
+  if (hasSections) {
+    const oneLiner = escapeHtml(sections.oneLiner || "");
+    const what = escapeHtml(sections.what || "");
+    const found = escapeHtml(sections.found || "");
+    const newness = escapeHtml(sections.newness || "");
+    const story = escapeHtml(sections.story || "");
+    summaryBlock = `<div class="mt-5 grid gap-5">
+  <section class="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+    <h3 class="text-sm font-bold tracking-wide text-slate-700">① 一言でいうと</h3>
+    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-900">${oneLiner || "（生成されませんでした）"}</p>
+  </section>
+
+  <section class="rounded-2xl border border-slate-200 bg-white p-5">
+    <h3 class="text-sm font-bold tracking-wide text-slate-700">② 何を調べたか</h3>
+    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-800">${what || "（生成されませんでした）"}</p>
+  </section>
+
+  <section class="rounded-2xl border border-slate-200 bg-white p-5">
+    <h3 class="text-sm font-bold tracking-wide text-slate-700">③ 何がわかったか</h3>
+    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-800">${found || "（生成されませんでした）"}</p>
+  </section>
+
+  <section class="rounded-2xl border border-slate-200 bg-white p-5">
+    <h3 class="text-sm font-bold tracking-wide text-slate-700">④ 何が新しいか</h3>
+    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-800">${newness || "（生成されませんでした）"}</p>
+  </section>
+
+  <section class="rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
+    <h3 class="text-sm font-bold tracking-wide text-indigo-900">⑤ 物語として面白く</h3>
+    <div class="mt-2 text-lg leading-relaxed whitespace-pre-wrap text-slate-900">${story || safeSummary || "（生成されませんでした）"}</div>
+  </section>
+</div>`;
+  } else if (safeSummary) {
     summaryBlock = `<div class="mt-4 text-lg leading-relaxed text-slate-800 whitespace-pre-wrap">${safeSummary}</div>`;
   } else if (safeExcerpt) {
     summaryBlock = `<p class="mt-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
@@ -509,7 +580,7 @@ async function main() {
     const rssExcerpt = await buildRssExcerpt(target);
 
     // Gemini で要約生成（APIキーがなければスキップ）
-    const { titleJa, summary, highlight } = await generateSummary(
+    const { titleJa, summary, highlight, sections } = await generateSummary(
       target.title || "",
       description
     );
@@ -531,6 +602,7 @@ async function main() {
         summary,
         highlight,
         rssExcerpt,
+        sections,
       }),
       "utf8"
     );
