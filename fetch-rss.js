@@ -403,7 +403,7 @@ function buildLineMessage(top3, dateStr) {
   const detailUrl = `${BASE_URL}/bio-news/${dateStr}/topic-1.html`;
   const displayTitle = item?._titleJa || item?.title || "(無題)";
 
-  const lines = ["🧬 今日のバイオニュース（1本）", "", `■ ${displayTitle}`];
+  const lines = ["🧬 今日のバイオニュース", "", `■ ${displayTitle}`];
   lines.push("", `要約はこちら：${detailUrl}`, `元記事：${item?.link || ""}`);
   return lines.join("\n").trimEnd();
 }
