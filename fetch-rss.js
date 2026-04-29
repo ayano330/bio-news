@@ -11,6 +11,9 @@ const BASE_URL = (
   process.env.BASE_URL || "https://ayano330.github.io/bio-news"
 ).replace(/\/$/, "");
 
+/** 取得・配信する本数（案1: デフォルト1本）。必要なら環境変数 TOP_N で変更可 */
+const TOP_N = Math.max(1, Math.min(3, Number(process.env.TOP_N || 1)));
+
 /**
  * HTML 書き出し先のルート。
  * ローカル実行: output/  (デフォルト)
@@ -217,7 +220,7 @@ async function generatePlainJapaneseSummary(title, description) {
   const descPart = description
     ? `\n概要（英語）：${description.slice(0, 900)}`
     : "";
-  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、日本語で高校生にも分かるように2〜4文で要約してください。前置き・見出し・箇条書き記号は不要で、要約の本文だけを出力してください。
+  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、日本語で高校生にも分かるように5〜8文で要約してください。前置き・見出し・箇条書き記号は不要で、要約の本文だけを出力してください。
 
 タイトル（英語）：${title}${descPart}`;
 
@@ -247,8 +250,8 @@ async function generateSummary(title, description) {
 次の3項目だけをJSON形式で返してください（コードブロック・余分な文字は不要）：
 {
   "titleJa": "日本語タイトル（自然な日本語・30文字以内）",
-  "summary": "研究の要約（2〜3文・高校生にも分かりやすく）",
-  "highlight": "この研究のすごいところ・新しさ（1〜2文）"
+  "summary": "研究の要約（5〜8文・高校生にも分かりやすく）",
+  "highlight": "ポイント（3項目。各項目は短い1文で、改行で区切る）"
 }`;
 
   console.log("[Gemini] 要約生成中:", title.slice(0, 60) + "…");
@@ -376,16 +379,16 @@ function topicPageHtml({
 // ----------------------------------------------------------------
 
 function buildLineMessage(top3, dateStr) {
-  const lines = ["🧬 今日のバイオニュース", ""];
-  top3.forEach((item, i) => {
-    const n = i + 1;
-    const detailUrl = `${BASE_URL}/bio-news/${dateStr}/topic-${n}.html`;
-    // 日本語タイトルがあればそちらを優先
-    const displayTitle = item._titleJa || item.title || "(無題)";
-    lines.push(`${n}. ${displayTitle}`);
-    lines.push(`詳細：${detailUrl}`);
-    lines.push("");
-  });
+  const item = top3[0];
+  const detailUrl = `${BASE_URL}/bio-news/${dateStr}/topic-1.html`;
+  const displayTitle = item?._titleJa || item?.title || "(無題)";
+  const summary = (item?._summary || "").trim();
+
+  const lines = ["🧬 今日のバイオニュース（1本）", "", `■ ${displayTitle}`];
+  if (summary) {
+    lines.push("", summary);
+  }
+  lines.push("", `詳細：${detailUrl}`, `元記事：${item?.link || ""}`);
   return lines.join("\n").trimEnd();
 }
 
@@ -453,7 +456,7 @@ async function main() {
   });
 
   const feed = await parser.parseURL(FEED_URL);
-  const top3 = feed.items.slice(0, 3);
+  const top3 = feed.items.slice(0, TOP_N);
 
   console.log("--- 取得した3件 ---");
   top3.forEach((item, i) => {
@@ -467,6 +470,7 @@ async function main() {
   console.log("BASE_URL:", BASE_URL);
   console.log("OUTPUT_ROOT:", OUTPUT_ROOT);
   console.log("GEMINI_MODEL:", GEMINI_MODEL);
+  console.log("TOP_N:", TOP_N);
   console.log("date (JST):", dateStr);
   console.log("");
 
@@ -474,33 +478,37 @@ async function main() {
   const outDir = path.join(OUTPUT_ROOT, "bio-news", dateStr);
   fs.mkdirSync(outDir, { recursive: true });
 
-  for (let i = 0; i < top3.length; i++) {
-    const item = top3[i];
-    const n = i + 1;
+  // 案1: 1本だけを濃く作る（TOP_N を上げても topic-1 だけ生成）
+  const target = top3[0];
+  if (target) {
+    const n = 1;
 
     // RSS の概要文（無ければ元ページから抜粋を補完）
     const description =
-      item.contentSnippet || item.content || item.description || item.summary || "";
-    const rssExcerpt = await buildRssExcerpt(item);
+      target.contentSnippet ||
+      target.content ||
+      target.description ||
+      target.summary ||
+      "";
+    const rssExcerpt = await buildRssExcerpt(target);
 
     // Gemini で要約生成（APIキーがなければスキップ）
-    // 2件目以降はレート制限を避けるため3秒待つ
-    if (i > 0) await new Promise((r) => setTimeout(r, 3000));
     const { titleJa, summary, highlight } = await generateSummary(
-      item.title || "",
+      target.title || "",
       description
     );
 
     // LINE 用に日本語タイトルを item に付与
-    item._titleJa = titleJa;
+    target._titleJa = titleJa;
+    target._summary = summary;
 
     // HTML 書き出し
     const filePath = path.join(outDir, `topic-${n}.html`);
     fs.writeFileSync(
       filePath,
       topicPageHtml({
-        title: item.title || "(無題)",
-        sourceUrl: item.link || "",
+        title: target.title || "(無題)",
+        sourceUrl: target.link || "",
         topicIndex: n,
         dateStr,
         titleJa,
