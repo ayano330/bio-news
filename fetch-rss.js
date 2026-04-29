@@ -79,6 +79,45 @@ function extractMetaDescription(html) {
   return "";
 }
 
+function extractFirstParagraphs(html, { maxChars = 2400, maxParagraphs = 6 } = {}) {
+  if (!html) return "";
+  const s = String(html);
+
+  // <article> / <main> を優先して、その中の <p> を拾う（雑にでも「本文の雰囲気」を渡すのが目的）
+  const scopeMatch =
+    s.match(/<article[\s\S]*?<\/article>/i) ||
+    s.match(/<main[\s\S]*?<\/main>/i) ||
+    s.match(/<body[\s\S]*?<\/body>/i);
+  const scope = scopeMatch ? scopeMatch[0] : s;
+
+  const paras = [];
+  const re = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+  let m;
+  while ((m = re.exec(scope)) && paras.length < maxParagraphs) {
+    const txt = stripTags(m[1]);
+    if (!txt) continue;
+    // ナビゲーション等の短すぎる段落は避ける
+    if (txt.length < 40) continue;
+    paras.push(txt);
+  }
+  const joined = paras.join("\n\n").slice(0, maxChars).trim();
+  return joined;
+}
+
+async function buildArticleContext(item) {
+  const url = item?.link || "";
+  if (!url) return "";
+  const html = await fetchUrl(url, { timeoutMs: 15000, maxBytes: 900_000 });
+  if (!html) return "";
+
+  const meta = extractMetaDescription(html);
+  const paras = extractFirstParagraphs(html);
+  const parts = [];
+  if (meta) parts.push(`meta description: ${meta}`);
+  if (paras) parts.push(`本文抜粋:\n${paras}`);
+  return parts.join("\n\n").trim();
+}
+
 function fetchUrl(url, { timeoutMs = 12000, maxBytes = 512_000 } = {}) {
   if (!url) return Promise.resolve("");
   return new Promise((resolve) => {
@@ -238,12 +277,25 @@ async function generatePlainJapaneseSummary(title, description) {
   return text;
 }
 
+async function generateJapaneseTitle(title, description, articleContext) {
+  if (!process.env.GEMINI_API_KEY) return "";
+  const ctx = articleContext ? `\n本文情報：${articleContext.slice(0, 1200)}` : "";
+  const descPart = description
+    ? `\n概要（英語）：${description.slice(0, 400)}`
+    : "";
+  const prompt = `次の生物学関連の記事について、日本語タイトルを1つだけ作ってください。自然な日本語で、30文字以内。余計な文字は出さず、タイトルだけを書いてください。
+
+タイトル（英語）：${title}${descPart}${ctx}`;
+  const out = (await callGemini(prompt)).trim();
+  return out.replace(/^["「『]/, "").replace(/["」』]$/, "").trim();
+}
+
 /**
  * RSS のタイトルと概要文から日本語の要約データを生成する。
  * GEMINI_API_KEY が未設定の場合は空文字オブジェクトを返す。
  * @returns {{ titleJa: string, summary: string, highlight: string, sections?: any }}
  */
-async function generateSummary(title, description) {
+async function generateSummary(title, description, articleContext) {
   if (!process.env.GEMINI_API_KEY) {
     console.log("[Gemini] GEMINI_API_KEY が未設定のためスキップします");
     return { titleJa: "", summary: "", highlight: "" };
@@ -252,9 +304,12 @@ async function generateSummary(title, description) {
   const descPart = description
     ? `\n概要（英語）：${description.slice(0, 600)}`
     : "";
+  const ctxPart = articleContext
+    ? `\n\n本文情報（HTMLから抽出した抜粋。参考にして具体的に）：\n${articleContext.slice(0, 2600)}`
+    : "";
 
   const prompt = `以下の生物学関連の記事について、日本語で答えてください。対象は生物に興味がある高校生です。事実と推測を区別し、誇張しないでください。
-タイトル（英語）：${title}${descPart}
+タイトル（英語）：${title}${descPart}${ctxPart}
 
 次の形式のJSONだけを返してください（コードブロック・余分な文字は不要）：
 {
@@ -309,6 +364,11 @@ async function generateSummary(title, description) {
   if (!summary && !sections) {
     summary = await generatePlainJapaneseSummary(title, description);
     if (summary) console.log("[Gemini] プレーン要約で成功 ✓");
+  }
+
+  if (!titleJa) {
+    titleJa = await generateJapaneseTitle(title, description, articleContext);
+    if (titleJa) console.log("[Gemini] 日本語タイトル生成 ✓");
   }
 
   return { titleJa, summary, highlight, sections };
@@ -578,11 +638,13 @@ async function main() {
       target.summary ||
       "";
     const rssExcerpt = await buildRssExcerpt(target);
+    const articleContext = await buildArticleContext(target);
 
     // Gemini で要約生成（APIキーがなければスキップ）
     const { titleJa, summary, highlight, sections } = await generateSummary(
       target.title || "",
-      description
+      description,
+      articleContext
     );
 
     // LINE 用に日本語タイトルを item に付与
