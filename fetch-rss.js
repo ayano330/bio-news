@@ -47,6 +47,93 @@ function stripTags(htmlish) {
     .trim();
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function tryDecodeHtmlEntities(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function extractMetaDescription(html) {
+  if (!html) return "";
+  const s = String(html);
+  const patterns = [
+    /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+name=["']twitter:description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+  ];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (m?.[1]) return tryDecodeHtmlEntities(m[1]).trim();
+  }
+  return "";
+}
+
+function fetchUrl(url, { timeoutMs = 12000, maxBytes = 512_000 } = {}) {
+  if (!url) return Promise.resolve("");
+  return new Promise((resolve) => {
+    const req = https.request(
+      url,
+      {
+        method: "GET",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      },
+      (res) => {
+        const status = res.statusCode || 0;
+        if (status >= 400) {
+          res.resume();
+          return resolve("");
+        }
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+          if (data.length > maxBytes) {
+            req.destroy();
+          }
+        });
+        res.on("end", () => resolve(data));
+      }
+    );
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      resolve("");
+    });
+    req.on("error", () => resolve(""));
+    req.end();
+  });
+}
+
+async function buildRssExcerpt(item) {
+  const raw =
+    item?.contentSnippet ||
+    item?.content ||
+    item?.description ||
+    item?.summary ||
+    "";
+  const cleaned = stripTags(raw);
+  if (cleaned) return cleaned.slice(0, 2000);
+
+  // RSS に概要が無い場合は、元ページの meta description を拾う（取れれば表示）
+  const html = await fetchUrl(item?.link || "");
+  const meta = extractMetaDescription(html);
+  if (meta) return meta.slice(0, 2000);
+
+  // それでも無ければ「空」にはしない（テンプレが最終エラー表示にならないようにする）
+  return "（RSSに概要がないため抜粋を取得できませんでした）";
+}
+
 /** JST の今日を YYYY-MM-DD */
 function todayJstYmd() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Tokyo" });
@@ -57,7 +144,7 @@ function todayJstYmd() {
 // ----------------------------------------------------------------
 
 /** Gemini にプロンプトを送り、生テキストを返す。失敗時は "" を返す（例外を投げない） */
-function callGemini(prompt) {
+function callGemini(prompt, { attempt = 1, maxAttempts = 4 } = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return Promise.resolve("");
 
@@ -82,7 +169,7 @@ function callGemini(prompt) {
       (res) => {
         let data = "";
         res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
+        res.on("end", async () => {
           if (res.statusCode === 200) {
             try {
               const json = JSON.parse(data);
@@ -93,7 +180,22 @@ function callGemini(prompt) {
               resolve("");
             }
           } else {
-            console.warn("[Gemini] HTTPエラー:", res.statusCode, data.slice(0, 400));
+            const status = res.statusCode || 0;
+            const retryable = status === 429 || status === 503 || status === 500;
+            console.warn("[Gemini] HTTPエラー:", status, data.slice(0, 400));
+
+            if (retryable && attempt < maxAttempts) {
+              const base = 1500;
+              const jitter = Math.floor(Math.random() * 400);
+              const wait = base * Math.pow(2, attempt - 1) + jitter;
+              console.log(`[Gemini] リトライ (${attempt + 1}/${maxAttempts}) まで ${wait}ms 待機…`);
+              await sleep(wait);
+              resolve(
+                await callGemini(prompt, { attempt: attempt + 1, maxAttempts })
+              );
+              return;
+            }
+
             resolve("");
           }
         });
@@ -376,9 +478,10 @@ async function main() {
     const item = top3[i];
     const n = i + 1;
 
-    // RSS の概要文（description / contentSnippet）を取得
-    const description = item.contentSnippet || item.content || item.description || "";
-    const rssExcerpt = stripTags(description).slice(0, 2000);
+    // RSS の概要文（無ければ元ページから抜粋を補完）
+    const description =
+      item.contentSnippet || item.content || item.description || item.summary || "";
+    const rssExcerpt = await buildRssExcerpt(item);
 
     // Gemini で要約生成（APIキーがなければスキップ）
     // 2件目以降はレート制限を避けるため3秒待つ
