@@ -26,6 +26,12 @@ const OUTPUT_ROOT = process.env.OUTPUT_ROOT
 /** Gemini のモデル ID（ListModels またはドキュメントで確認）。古い gemini-1.5-flash は v1beta で未提供になることがある */
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
+/** generateContent の最大出力トークン（長いJSON用）。環境変数 GEMINI_MAX_OUTPUT_TOKENS で上書き可 */
+const GEMINI_MAX_OUTPUT_TOKENS = Math.min(
+  8192,
+  Math.max(512, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 4096))
+);
+
 const LINE_MESSAGE_REL = path.join("bio-news", ".last_line_message.txt");
 
 // ----------------------------------------------------------------
@@ -39,6 +45,16 @@ function escapeHtml(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/** Gemini が時々混ぜる Markdown 記号を軽く除去（ページに ** が露出しないように） */
+function sanitizeAiText(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .trim();
 }
 
 /** RSS の HTML タグを除いた平文（要約失敗時の補助表示用） */
@@ -186,13 +202,20 @@ function todayJstYmd() {
 // ----------------------------------------------------------------
 
 /** Gemini にプロンプトを送り、生テキストを返す。失敗時は "" を返す（例外を投げない） */
-function callGemini(prompt, { attempt = 1, maxAttempts = 4 } = {}) {
+function callGemini(
+  prompt,
+  {
+    attempt = 1,
+    maxAttempts = 4,
+    maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS,
+  } = {}
+) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return Promise.resolve("");
 
   const body = JSON.stringify({
     contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
+    generationConfig: { temperature: 0.3, maxOutputTokens },
   });
 
   const modelPath = `/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -215,9 +238,34 @@ function callGemini(prompt, { attempt = 1, maxAttempts = 4 } = {}) {
           if (res.statusCode === 200) {
             try {
               const json = JSON.parse(data);
-              resolve(
-                (json.candidates?.[0]?.content?.parts?.[0]?.text || "").trim()
-              );
+              const cand = json.candidates?.[0];
+              const text = (cand?.content?.parts?.[0]?.text || "").trim();
+              const finishReason = cand?.finishReason || "";
+
+              if (
+                finishReason === "MAX_TOKENS" &&
+                attempt < maxAttempts &&
+                text
+              ) {
+                const bumped = Math.min(
+                  8192,
+                  Math.max(maxOutputTokens * 2, 4096)
+                );
+                console.warn(
+                  `[Gemini] 出力が MAX_TOKENS で切れました。リトライ (${attempt + 1}/${maxAttempts}) maxOut=${bumped}`
+                );
+                await sleep(400 + Math.floor(Math.random() * 250));
+                resolve(
+                  await callGemini(prompt, {
+                    attempt: attempt + 1,
+                    maxAttempts,
+                    maxOutputTokens: bumped,
+                  })
+                );
+                return;
+              }
+
+              resolve(text);
             } catch {
               resolve("");
             }
@@ -233,7 +281,11 @@ function callGemini(prompt, { attempt = 1, maxAttempts = 4 } = {}) {
               console.log(`[Gemini] リトライ (${attempt + 1}/${maxAttempts}) まで ${wait}ms 待機…`);
               await sleep(wait);
               resolve(
-                await callGemini(prompt, { attempt: attempt + 1, maxAttempts })
+                await callGemini(prompt, {
+                  attempt: attempt + 1,
+                  maxAttempts,
+                  maxOutputTokens,
+                })
               );
               return;
             }
@@ -273,7 +325,9 @@ async function generatePlainJapaneseSummary(title, description) {
 タイトル（英語）：${title}${descPart}`;
 
   console.log("[Gemini] プレーン要約にフォールバック…");
-  const text = (await callGemini(prompt)).trim();
+  const text = sanitizeAiText(
+    (await callGemini(prompt, { maxOutputTokens: 2048 })).trim()
+  );
   return text;
 }
 
@@ -286,7 +340,9 @@ async function generateJapaneseTitle(title, description, articleContext) {
   const prompt = `次の生物学関連の記事について、日本語タイトルを1つだけ作ってください。自然な日本語で、30文字以内。余計な文字は出さず、タイトルだけを書いてください。
 
 タイトル（英語）：${title}${descPart}${ctx}`;
-  const out = (await callGemini(prompt)).trim();
+  const out = sanitizeAiText(
+    (await callGemini(prompt, { maxOutputTokens: 384 })).trim()
+  );
   return out.replace(/^["「『]/, "").replace(/["」』]$/, "").trim();
 }
 
@@ -312,6 +368,8 @@ async function generateSummary(title, description, articleContext) {
 タイトル（英語）：${title}${descPart}${ctxPart}
 
 次の形式のJSONだけを返してください（コードブロック・余分な文字は不要）：
+- JSON以外は一切書かない（説明文やMarkdownは禁止）
+- 文字列内に ** や ### などの装飾は入れない（プレーンテキスト）
 {
   "titleJa": "日本語タイトル（自然な日本語・30文字以内）",
   "oneLiner": "①一言でいうと（1文）",
@@ -336,13 +394,15 @@ async function generateSummary(title, description, articleContext) {
       .replace(/```\s*/g, "")
       .trim();
     const parsed = JSON.parse(jsonStr);
-    titleJa = (parsed.titleJa || "").trim();
-    const oneLiner = (parsed.oneLiner || "").trim();
-    const what = (parsed.what || "").trim();
-    const found = (parsed.found || "").trim();
-    const newness = (parsed.newness || "").trim();
-    const story = (parsed.story || "").trim();
-    const pointsArr = Array.isArray(parsed.points) ? parsed.points : [];
+    titleJa = sanitizeAiText((parsed.titleJa || "").trim());
+    const oneLiner = sanitizeAiText((parsed.oneLiner || "").trim());
+    const what = sanitizeAiText((parsed.what || "").trim());
+    const found = sanitizeAiText((parsed.found || "").trim());
+    const newness = sanitizeAiText((parsed.newness || "").trim());
+    const story = sanitizeAiText((parsed.story || "").trim());
+    const pointsArr = Array.isArray(parsed.points)
+      ? parsed.points.map((p) => sanitizeAiText(String(p || "").trim())).filter(Boolean)
+      : [];
 
     sections = { oneLiner, what, found, newness, story, points: pointsArr };
 
@@ -397,10 +457,10 @@ function topicPageHtml({
   sections,
 }) {
   const safeTitle = escapeHtml(title);
-  const safeTitleJa = escapeHtml(titleJa || "");
+  const safeTitleJa = escapeHtml(sanitizeAiText(titleJa || ""));
   const safeSource = escapeHtml(sourceUrl || "");
-  const safeSummary = escapeHtml(summary || "");
-  const safeHighlightRaw = String(highlight || "").trim();
+  const safeSummary = escapeHtml(sanitizeAiText(summary || ""));
+  const safeHighlightRaw = sanitizeAiText(String(highlight || "").trim());
   const safeExcerpt = escapeHtml(rssExcerpt || "");
   const gradient = TOPIC_COLORS[(topicIndex - 1) % TOPIC_COLORS.length];
 
@@ -617,6 +677,7 @@ async function main() {
   console.log("BASE_URL:", BASE_URL);
   console.log("OUTPUT_ROOT:", OUTPUT_ROOT);
   console.log("GEMINI_MODEL:", GEMINI_MODEL);
+  console.log("GEMINI_MAX_OUTPUT_TOKENS:", GEMINI_MAX_OUTPUT_TOKENS);
   console.log("TOP_N:", TOP_N);
   console.log("date (JST):", dateStr);
   console.log("");
