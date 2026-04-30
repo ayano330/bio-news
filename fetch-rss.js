@@ -1,5 +1,7 @@
 const fs = require("fs");
+const http = require("http");
 const https = require("https");
+const { URL } = require("url");
 const path = require("path");
 const RSSParser = require("rss-parser");
 
@@ -84,7 +86,10 @@ function extractMetaDescription(html) {
   if (!html) return "";
   const s = String(html);
   const patterns = [
+    // content=... が先、property=... が後 など属性順が入れ替わるケース
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["'][^>]*>/i,
     /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["'][^>]*>/i,
     /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
     /<meta[^>]+name=["']twitter:description["'][^>]+content=["']([^"']+)["'][^>]*>/i,
   ];
@@ -106,16 +111,34 @@ function extractFirstParagraphs(html, { maxChars = 2400, maxParagraphs = 6 } = {
     s.match(/<body[\s\S]*?<\/body>/i);
   const scope = scopeMatch ? scopeMatch[0] : s;
 
-  const paras = [];
-  const re = /<p[^>]*>([\s\S]*?)<\/p>/gi;
-  let m;
-  while ((m = re.exec(scope)) && paras.length < maxParagraphs) {
-    const txt = stripTags(m[1]);
-    if (!txt) continue;
-    // ナビゲーション等の短すぎる段落は避ける
-    if (txt.length < 40) continue;
-    paras.push(txt);
+  const collectFrom = (text) => {
+    const out = [];
+    const re = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+    let m;
+    while ((m = re.exec(text)) && out.length < maxParagraphs) {
+      const rawTxt = stripTags(m[1]);
+      if (!rawTxt) continue;
+      const txt = rawTxt.replace(/\u00a0/g, " ").trim();
+      // ナビゲーション等の短すぎる段落は避ける（取れなければ下限を下げる）
+      if (txt.length < 40) continue;
+      out.push(txt);
+    }
+    return out;
+  };
+
+  let paras = collectFrom(scope);
+  if (!paras.length) paras = collectFrom(s);
+
+  // それでも短い段落しか無いときは、下限を緩めて拾う
+  if (!paras.length) {
+    const re = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+    let m;
+    while ((m = re.exec(scope)) && paras.length < maxParagraphs) {
+      const txt = stripTags(m[1]).replace(/\u00a0/g, " ").trim();
+      if (txt.length >= 20) paras.push(txt);
+    }
   }
+
   const joined = paras.join("\n\n").slice(0, maxChars).trim();
   return joined;
 }
@@ -134,21 +157,50 @@ async function buildArticleContext(item) {
   return parts.join("\n\n").trim();
 }
 
-function fetchUrl(url, { timeoutMs = 12000, maxBytes = 512_000 } = {}) {
+function fetchUrl(
+  url,
+  { timeoutMs = 12000, maxBytes = 512_000, redirectLeft = 5 } = {}
+) {
   if (!url) return Promise.resolve("");
+
   return new Promise((resolve) => {
-    const req = https.request(
-      url,
+    let target;
+    try {
+      target = new URL(url);
+    } catch {
+      return resolve("");
+    }
+
+    const lib = target.protocol === "http:" ? http : https;
+    const req = lib.request(
+      target,
       {
         method: "GET",
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
         },
       },
       (res) => {
         const status = res.statusCode || 0;
+        if (status >= 300 && status < 400 && res.headers.location && redirectLeft > 0) {
+          res.resume();
+          let nextUrl;
+          try {
+            nextUrl = new URL(res.headers.location, target).href;
+          } catch {
+            return resolve("");
+          }
+          return resolve(
+            fetchUrl(nextUrl, {
+              timeoutMs,
+              maxBytes,
+              redirectLeft: redirectLeft - 1,
+            })
+          );
+        }
         if (status >= 400) {
           res.resume();
           return resolve("");
