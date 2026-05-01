@@ -53,9 +53,13 @@ function escapeHtml(text) {
 function sanitizeAiText(text) {
   if (!text) return "";
   return String(text)
+    .replace(/\uFFFD/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
     .replace(/\*\*(.*?)\*\*/g, "$1")
     .replace(/\*(.*?)\*/g, "$1")
     .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
@@ -424,11 +428,7 @@ async function generateSummary(title, description, articleContext) {
 - 文字列内に ** や ### などの装飾は入れない（プレーンテキスト）
 {
   "titleJa": "日本語タイトル（自然な日本語・30文字以内）",
-  "oneLiner": "①一言でいうと（1文）",
-  "what": "②何を調べたか（1〜3文）",
-  "found": "③何がわかったか（1〜3文）",
-  "newness": "④何が新しいか（1〜2文）",
-  "story": "⑤物語として面白く（読み物として6〜10文。全体の目安400〜700字だが必要なら超えてOK）",
+  "story": "物語として面白く（3〜5段落。段落の間は空行を1行。全体の目安400〜900字、必要なら超えてOK）",
   "points": ["ポイント1（短い1文）", "ポイント2（短い1文）", "ポイント3（短い1文）"]
 }`;
 
@@ -447,16 +447,12 @@ async function generateSummary(title, description, articleContext) {
       .trim();
     const parsed = JSON.parse(jsonStr);
     titleJa = sanitizeAiText((parsed.titleJa || "").trim());
-    const oneLiner = sanitizeAiText((parsed.oneLiner || "").trim());
-    const what = sanitizeAiText((parsed.what || "").trim());
-    const found = sanitizeAiText((parsed.found || "").trim());
-    const newness = sanitizeAiText((parsed.newness || "").trim());
     const story = sanitizeAiText((parsed.story || "").trim());
     const pointsArr = Array.isArray(parsed.points)
       ? parsed.points.map((p) => sanitizeAiText(String(p || "").trim())).filter(Boolean)
       : [];
 
-    sections = { oneLiner, what, found, newness, story, points: pointsArr };
+    sections = { story, points: pointsArr };
 
     // ページに出す「本文」は story を中心に、他セクションも読めるようにまとめる
     summary = story;
@@ -466,7 +462,7 @@ async function generateSummary(title, description, articleContext) {
       .join("\n");
     highlight = pointsText;
 
-    if (summary || oneLiner || what || found || newness) {
+    if (summary || story) {
       console.log("[Gemini] 生成成功 ✓");
     }
   } catch {
@@ -520,44 +516,14 @@ function topicPageHtml({
   const hasSections =
     sections &&
     typeof sections === "object" &&
-    (sections.oneLiner ||
-      sections.what ||
-      sections.found ||
-      sections.newness ||
-      sections.story);
+    sections.story;
 
   if (hasSections) {
-    const oneLiner = escapeHtml(sections.oneLiner || "");
-    const what = escapeHtml(sections.what || "");
-    const found = escapeHtml(sections.found || "");
-    const newness = escapeHtml(sections.newness || "");
     const story = escapeHtml(sections.story || "");
-    summaryBlock = `<div class="mt-5 grid gap-5">
-  <section class="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-    <h3 class="text-sm font-bold tracking-wide text-slate-700">① 一言でいうと</h3>
-    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-900">${oneLiner || "（生成されませんでした）"}</p>
-  </section>
-
-  <section class="rounded-2xl border border-slate-200 bg-white p-5">
-    <h3 class="text-sm font-bold tracking-wide text-slate-700">② 何を調べたか</h3>
-    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-800">${what || "（生成されませんでした）"}</p>
-  </section>
-
-  <section class="rounded-2xl border border-slate-200 bg-white p-5">
-    <h3 class="text-sm font-bold tracking-wide text-slate-700">③ 何がわかったか</h3>
-    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-800">${found || "（生成されませんでした）"}</p>
-  </section>
-
-  <section class="rounded-2xl border border-slate-200 bg-white p-5">
-    <h3 class="text-sm font-bold tracking-wide text-slate-700">④ 何が新しいか</h3>
-    <p class="mt-2 text-base leading-relaxed whitespace-pre-wrap text-slate-800">${newness || "（生成されませんでした）"}</p>
-  </section>
-
-  <section class="rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
-    <h3 class="text-sm font-bold tracking-wide text-indigo-900">⑤ 物語として面白く</h3>
-    <div class="mt-2 text-lg leading-relaxed whitespace-pre-wrap text-slate-900">${story || safeSummary || "（生成されませんでした）"}</div>
-  </section>
-</div>`;
+    summaryBlock = `<section class="mt-5 rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
+  <h3 class="text-sm font-bold tracking-wide text-indigo-900">物語として面白く</h3>
+  <div class="mt-3 text-lg leading-relaxed whitespace-pre-wrap text-slate-900">${story || safeSummary || "（生成されませんでした）"}</div>
+</section>`;
   } else if (safeSummary) {
     summaryBlock = `<div class="mt-4 text-lg leading-relaxed text-slate-800 whitespace-pre-wrap">${safeSummary}</div>`;
   } else if (safeExcerpt) {
@@ -614,7 +580,7 @@ ${items
     <article class="rounded-3xl border border-slate-200 bg-white shadow-xl overflow-hidden">
       <div class="bg-gradient-to-r ${gradient} px-6 py-6 text-white">
         <p class="text-xs font-semibold tracking-wide opacity-90">
-          ${dateStr} · topic ${topicIndex}
+          ${dateStr}
         </p>
         <h1 class="mt-2 text-xl font-bold leading-snug md:text-2xl">${safeTitle}</h1>
         ${titleJaHtml}
