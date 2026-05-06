@@ -696,6 +696,86 @@ function sendLineMessage(text) {
 }
 
 // ----------------------------------------------------------------
+// Pages 反映待ち（LINE 送信前）
+// ----------------------------------------------------------------
+
+function httpGetStatus(urlStr) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(urlStr);
+    } catch (e) {
+      reject(new Error(`URL が不正です: ${urlStr}`));
+      return;
+    }
+
+    const lib = u.protocol === "http:" ? http : https;
+    const req = lib.request(
+      {
+        method: "GET",
+        hostname: u.hostname,
+        path: u.pathname + (u.search || ""),
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; bio-news-tool/1.0; +https://github.com/ayano330/bio-news)",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      },
+      (res) => {
+        // GitHub Pages は 301/302 を返すことがあるため追跡する
+        const status = res.statusCode || 0;
+        const location = res.headers?.location;
+        res.resume();
+        resolve({ status, location });
+      }
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+async function waitForPublishedUrl(urlStr, options = {}) {
+  const timeoutMs = Math.max(
+    10_000,
+    Number(options.timeoutMs || process.env.PAGES_WAIT_TIMEOUT_MS || 180_000)
+  );
+  const intervalMs = Math.max(
+    1_000,
+    Number(options.intervalMs || process.env.PAGES_WAIT_INTERVAL_MS || 5_000)
+  );
+
+  const started = Date.now();
+  let current = urlStr;
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const { status, location } = await httpGetStatus(current);
+      if (status >= 200 && status < 300) return current;
+      if ((status === 301 || status === 302 || status === 307 || status === 308) && location) {
+        // location が相対の場合もある
+        try {
+          current = new URL(location, current).toString();
+        } catch {
+          // URL 解決に失敗したら現状維持
+        }
+      }
+    } catch {
+      // 一時的な DNS/ネットワーク失敗は待機してリトライ
+    }
+    await sleep(intervalMs);
+  }
+
+  throw new Error(
+    `Pages 反映待ちがタイムアウトしました（${timeoutMs}ms）: ${urlStr}`
+  );
+}
+
+function extractSummaryUrlFromLineText(text) {
+  const m = String(text || "").match(/要約はこちら：\s*(\S+)/);
+  return m ? m[1] : "";
+}
+
+// ----------------------------------------------------------------
 // メイン処理
 // ----------------------------------------------------------------
 
@@ -809,7 +889,22 @@ function runSendLineOnly() {
     );
   }
   const text = fs.readFileSync(lineMsgPath, "utf8");
-  return sendLineMessage(text);
+  const summaryUrl = extractSummaryUrlFromLineText(text);
+  if (!summaryUrl) {
+    console.warn(
+      "[LINE] 要約URLを抽出できませんでした。反映待ちはスキップして送信します。"
+    );
+    return sendLineMessage(text);
+  }
+
+  console.log("[LINE] Pages 反映待ち:", summaryUrl);
+  return waitForPublishedUrl(summaryUrl)
+    .then(() => sendLineMessage(text))
+    .catch((err) => {
+      console.warn("[LINE] Pages 反映待ちに失敗:", err.message);
+      console.warn("[LINE] 反映待ちを諦めて送信します。");
+      return sendLineMessage(text);
+    });
 }
 
 const argv = process.argv.slice(2);
