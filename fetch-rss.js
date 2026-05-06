@@ -734,6 +734,82 @@ function httpGetStatus(urlStr) {
   });
 }
 
+function httpGetText(urlStr, options = {}) {
+  const maxBytes = Math.max(1024, Number(options.maxBytes || 64 * 1024));
+  const timeoutMs = Math.max(2_000, Number(options.timeoutMs || 10_000));
+
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(urlStr);
+    } catch {
+      reject(new Error(`URL が不正です: ${urlStr}`));
+      return;
+    }
+
+    const lib = u.protocol === "http:" ? http : https;
+    const req = lib.request(
+      {
+        method: "GET",
+        hostname: u.hostname,
+        path: u.pathname + (u.search || ""),
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (compatible; bio-news-tool/1.0; +https://github.com/ayano330/bio-news)",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      },
+      (res) => {
+        const status = res.statusCode || 0;
+        const location = res.headers?.location;
+
+        // リダイレクトは追跡せず、呼び出し側で処理
+        if (status === 301 || status === 302 || status === 307 || status === 308) {
+          res.resume();
+          resolve({ status, location, text: "" });
+          return;
+        }
+
+        const chunks = [];
+        let total = 0;
+        res.on("data", (chunk) => {
+          if (!chunk) return;
+          total += chunk.length || 0;
+          if (total <= maxBytes) chunks.push(chunk);
+          if (total >= maxBytes) req.destroy();
+        });
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status, location: "", text });
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`HTTP タイムアウト (${timeoutMs}ms)`));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function extractDateFromSummaryUrl(urlStr) {
+  const m = String(urlStr || "").match(/\/bio-news\/(\d{4}-\d{2}-\d{2})\//);
+  return m ? m[1] : "";
+}
+
+function extractTitleFromLineText(text) {
+  const m = String(text || "").match(/^\s*■\s*(.+)\s*$/m);
+  return m ? m[1].trim() : "";
+}
+
+function makeTitleProbe(title) {
+  const t = String(title || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  // 長すぎると一致しづらいので先頭だけ見る
+  return t.slice(0, 18);
+}
+
 async function waitForPublishedUrl(urlStr, options = {}) {
   const timeoutMs = Math.max(
     10_000,
@@ -767,6 +843,57 @@ async function waitForPublishedUrl(urlStr, options = {}) {
 
   throw new Error(
     `Pages 反映待ちがタイムアウトしました（${timeoutMs}ms）: ${urlStr}`
+  );
+}
+
+async function waitForPublishedPage(urlStr, expectations = {}, options = {}) {
+  const timeoutMs = Math.max(
+    10_000,
+    Number(options.timeoutMs || process.env.PAGES_WAIT_TIMEOUT_MS || 180_000)
+  );
+  const intervalMs = Math.max(
+    1_000,
+    Number(options.intervalMs || process.env.PAGES_WAIT_INTERVAL_MS || 5_000)
+  );
+  const fetchTimeoutMs = Math.max(
+    2_000,
+    Number(options.fetchTimeoutMs || process.env.PAGES_FETCH_TIMEOUT_MS || 10_000)
+  );
+
+  const expectedDate = String(expectations.dateStr || "").trim();
+  const expectedTitleProbe = String(expectations.titleProbe || "").trim();
+
+  const started = Date.now();
+  let current = urlStr;
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const { status, location, text } = await httpGetText(current, {
+        timeoutMs: fetchTimeoutMs,
+      });
+
+      if (
+        (status === 301 || status === 302 || status === 307 || status === 308) &&
+        location
+      ) {
+        try {
+          current = new URL(location, current).toString();
+        } catch {
+          // ignore
+        }
+      } else if (status >= 200 && status < 300) {
+        const okDate = !expectedDate || text.includes(expectedDate);
+        const okTitle = !expectedTitleProbe || text.includes(expectedTitleProbe);
+        if (okDate && okTitle) return current;
+      }
+    } catch {
+      // 一時的な失敗は待機してリトライ
+    }
+    await sleep(intervalMs);
+  }
+
+  throw new Error(
+    `Pages の内容確認がタイムアウトしました（${timeoutMs}ms）: ${urlStr}`
   );
 }
 
@@ -897,8 +1024,19 @@ function runSendLineOnly() {
     return sendLineMessage(text);
   }
 
-  console.log("[LINE] Pages 反映待ち:", summaryUrl);
-  return waitForPublishedUrl(summaryUrl)
+  const dateStr = extractDateFromSummaryUrl(summaryUrl);
+  const title = extractTitleFromLineText(text);
+  const titleProbe = makeTitleProbe(title);
+
+  console.log(
+    "[LINE] Pages 反映待ち:",
+    summaryUrl,
+    dateStr ? `(date=${dateStr})` : "",
+    titleProbe ? `(title~=${titleProbe})` : ""
+  );
+
+  // 200 だけでなく、日付とタイトルの一部が含まれるかも確認
+  return waitForPublishedPage(summaryUrl, { dateStr, titleProbe })
     .then(() => sendLineMessage(text))
     .catch((err) => {
       console.warn("[LINE] Pages 反映待ちに失敗:", err.message);
