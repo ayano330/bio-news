@@ -367,16 +367,16 @@ async function generatePlainJapaneseSummary(title, description) {
   const descPart = description
     ? `\n概要（英語）：${description.slice(0, 900)}`
     : "";
-  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、生物に興味がある高校生が「わくわく」しながら読める日本語でまとめてください。ただし事実と推測は区別し、誇張しないでください。
+  const prompt = `あなたは科学ニュースの編集者です。次の生物学関連の記事について、生物に興味がある高校生向けに、高校の教科書で説明される程度の具体性でまとめてください。ゲノムや転写調節因子など、高校生物の範囲の用語は使って構いません。事実と推測は区別し、誇張しないでください。
 
-次の見出しを必ずこの順番で出して、それぞれ1〜4文で書いてください：
-① 一言でいうと
-② 何を調べたか
-③ 何がわかったか
-④ 何が新しいか
-⑤ 物語として面白く（読み物として6〜10文）
+文体は必ず敬体（です・ます調）で統一してください（タメ口・である調は禁止）。
 
-全体の目安は400〜700字です（内容を正確に伝えるために必要なら超えてOK）。余計な前置きは不要です。
+次の流れを自然な読み物としてつなげて書いてください（見出しや番号は付けないでください）：
+・一言でいうと何の話か
+・何を調べたか
+・何がわかったか・なぜ注目か
+
+段落は3〜5つ程度とし、段落の間は空行を1行入れてください。全体の目安は400〜900字です（必要なら超えてOK）。余計な前置きは不要です。
 
 タイトル（英語）：${title}${descPart}`;
 
@@ -420,7 +420,12 @@ async function generateSummary(title, description, articleContext) {
     ? `\n\n本文情報（HTMLから抽出した抜粋。参考にして具体的に）：\n${articleContext.slice(0, 2600)}`
     : "";
 
-  const prompt = `以下の生物学関連の記事について、日本語で答えてください。対象は生物に興味がある高校生です。事実と推測を区別し、誇張しないでください。
+  const prompt = `以下の生物学関連の記事について、日本語で答えてください。対象は生物に興味がある高校生です。説明のレベルは高校の教科書程度とし、やや具体的に書いて構いません。ゲノムや転写調節因子など、高校生物の教科書に載る範囲の用語は使って構いません。事実と推測を区別し、誇張しないでください。
+
+文体のルール（重要）：
+- 本文（story）もポイント（points の各文）も、必ず敬体（です・ます調）で統一する
+- タメ口・である調・常体は使わない
+
 タイトル（英語）：${title}${descPart}${ctxPart}
 
 次の形式のJSONだけを返してください（コードブロック・余分な文字は不要）：
@@ -428,8 +433,8 @@ async function generateSummary(title, description, articleContext) {
 - 文字列内に ** や ### などの装飾は入れない（プレーンテキスト）
 {
   "titleJa": "日本語タイトル（自然な日本語・30文字以内）",
-  "story": "物語として面白く（3〜5段落。段落の間は空行を1行。全体の目安400〜900字、必要なら超えてOK）",
-  "points": ["ポイント1（短い1文）", "ポイント2（短い1文）", "ポイント3（短い1文）"]
+  "story": "日本語の本文要約（3〜5段落。段落の間は空行を1行。全体の目安400〜900字、必要なら超えてOK。です・ます調で統一）",
+  "points": ["ポイント1（短い1文・ですます）", "ポイント2（短い1文・ですます）", "ポイント3（短い1文・ですます）"]
 }`;
 
   console.log("[Gemini] 要約生成中:", title.slice(0, 60) + "…");
@@ -493,6 +498,12 @@ const TOPIC_COLORS = [
   "from-violet-600 to-fuchsia-500", // topic-3
 ];
 
+/** セクション見出し用の装飾アイコン（インライン SVG） */
+const ICON_BOOK =
+  '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-5 w-5 shrink-0 text-slate-500" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v15.128A9 9 0 009 18c0 1.036-.259 2.043-.751 2.928m0 0a9.036 9.036 0 01-3.006 0m3.006 0a9.036 9.036 0 01-3.006 0m3.006 0c.852 0 1.684-.103 2.498-.293M12 6.042a8.967 8.967 0 014-2.292c1.052 0 2.062.18 3 .512v15.128a9 9 0 01-6 0m6 0a9.036 9.036 0 01-3.006 0" /></svg>';
+const ICON_LIGHTBULB =
+  '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-5 w-5 shrink-0 text-amber-700" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18v-5.25m0 0a6.01 6.01 0 001.5-.189m-1.5.189a6.01 6.01 0 01-1.5-.189m3.75 7.478a12.06 12.06 0 01-4.5 0m3.75 2.383a14.406 14.406 0 01-3 0M14.25 18v-.192c0-.983.658-1.823 1.508-2.316a7.5 7.5 0 10-7.323 0c.85.493 1.509 1.333 1.509 2.316V18" /></svg>';
+
 function topicPageHtml({
   title,
   sourceUrl,
@@ -521,8 +532,7 @@ function topicPageHtml({
   if (hasSections) {
     const story = escapeHtml(sections.story || "");
     summaryBlock = `<section class="mt-5 rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
-  <h3 class="text-sm font-bold tracking-wide text-indigo-900">物語として面白く</h3>
-  <div class="mt-3 text-lg leading-relaxed whitespace-pre-wrap text-slate-900">${story || safeSummary || "（生成されませんでした）"}</div>
+  <div class="text-lg leading-relaxed whitespace-pre-wrap text-slate-900">${story || safeSummary || "（生成されませんでした）"}</div>
 </section>`;
   } else if (safeSummary) {
     summaryBlock = `<div class="mt-4 text-lg leading-relaxed text-slate-800 whitespace-pre-wrap">${safeSummary}</div>`;
@@ -557,7 +567,7 @@ ${items
           safeHighlightRaw
         )}</p>`;
     highlightSection = `<section class="mt-8 rounded-2xl border border-amber-200 bg-amber-50 p-5">
-  <h2 class="text-sm font-bold uppercase tracking-wide text-amber-900">ポイント</h2>
+  <h2 class="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-amber-900">${ICON_LIGHTBULB}ポイント</h2>
   ${listHtml}
 </section>`;
   }
@@ -591,7 +601,7 @@ ${items
       </div>
 
       <div class="p-6 md:p-8">
-        <h2 class="text-sm font-bold uppercase tracking-wide text-slate-500">日本語要約</h2>
+        <h2 class="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-500">${ICON_BOOK}日本語要約</h2>
         ${summaryBlock}
         ${highlightSection}
       </div>
