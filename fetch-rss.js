@@ -63,6 +63,18 @@ function sanitizeAiText(text) {
     .trim();
 }
 
+/** 旧プロンプト由来で AI が本文に混入させがちな見出し行を除去 */
+function stripBannedSummaryLines(text) {
+  if (!text) return "";
+  const lineRe = /^[⑤5５]?\s*物語として面白く/;
+  return String(text)
+    .split("\n")
+    .filter((line) => !lineRe.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** RSS の HTML タグを除いた平文（要約失敗時の補助表示用） */
 function stripTags(htmlish) {
   if (!htmlish) return "";
@@ -381,8 +393,8 @@ async function generatePlainJapaneseSummary(title, description) {
 タイトル（英語）：${title}${descPart}`;
 
   console.log("[Gemini] プレーン要約にフォールバック…");
-  const text = sanitizeAiText(
-    (await callGemini(prompt, { maxOutputTokens: 2048 })).trim()
+  const text = stripBannedSummaryLines(
+    sanitizeAiText((await callGemini(prompt, { maxOutputTokens: 2048 })).trim())
   );
   return text;
 }
@@ -425,6 +437,7 @@ async function generateSummary(title, description, articleContext) {
 文体のルール（重要）：
 - 本文（story）もポイント（points の各文）も、必ず敬体（です・ます調）で統一する
 - タメ口・である調・常体は使わない
+- story の本文に「物語として面白く」「⑤」などの見出し・ラベル行は絶対に書かない（いきなり本文から書き始める）
 
 タイトル（英語）：${title}${descPart}${ctxPart}
 
@@ -452,9 +465,15 @@ async function generateSummary(title, description, articleContext) {
       .trim();
     const parsed = JSON.parse(jsonStr);
     titleJa = sanitizeAiText((parsed.titleJa || "").trim());
-    const story = sanitizeAiText((parsed.story || "").trim());
+    const story = stripBannedSummaryLines(
+      sanitizeAiText((parsed.story || "").trim())
+    );
     const pointsArr = Array.isArray(parsed.points)
-      ? parsed.points.map((p) => sanitizeAiText(String(p || "").trim())).filter(Boolean)
+      ? parsed.points
+          .map((p) =>
+            stripBannedSummaryLines(sanitizeAiText(String(p || "").trim()))
+          )
+          .filter(Boolean)
       : [];
 
     sections = { story, points: pointsArr };
